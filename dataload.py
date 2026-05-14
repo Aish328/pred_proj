@@ -97,15 +97,57 @@ class SmartGridDataLoader:
         scaled = self.scaler.fit_transform(self.df[features])      #converts all features to range [0,1] for nn to train faster, avoids dominance f large values
 
         return scaled   #returns numpy not dataframe
+    def generate_fault_labels(self,data):
+        labels = np.zeros(len(data))
 
-    def create_sequences(self, data, seq_length=48):        #for time series forecasting : creates input output pairs for sliding window
-        X= []
+        for i in range(len(data)):
+            row = data[i]
+            IR = row[0]
+            IY = row[1] 
+            IB = row[2]
+            VRY = row[3]
+            VYB = row[4]    
+            VBR = row[5]
+            LOAD = row[6]
+            if VRY < 0.20:
+                labels[i] = 1
+
+            # ==================================
+            # 2 = CURRENT IMBALANCE
+            # ==================================
+            elif abs(IR - IY) > 0.40:
+                labels[i] = 2
+
+            # ==================================
+            # 3 = OVERLOAD
+            # ==================================
+            elif LOAD > 0.80:
+                labels[i] = 3
+
+            # ==================================
+            # 4 = VOLTAGE SWELL
+            # ==================================
+            elif VRY > 0.95:
+                labels[i] = 4
+
+            # ==================================
+            # 5 = TRANSFORMER STRESS
+            # ==================================
+            elif LOAD > 0.70 and IR > 0.70:
+                labels[i] = 5
+
+        return labels.astype(int)
+
+
+    def create_sequences(self, data, labels, seq_length=48):        #for time series forecasting : creates input output pairs for sliding window
+        X = []
+        y = []
 
         for i in range(len(data) - seq_length): #SLIDES WINDOW ACROSS DATASET
             X.append(data[i:i+seq_length])  #TAKES CHUNK OF 48 TIME STEPS
-            # y.append(data[i+seq_length][0])  # predictS ONLU FIRST FEATURE / PREDICTS NEXT TIME STEP , FOR THAT SELECTED FIRST FEAURE : GLobal_active_power by [0]
+            y.append(labels[i+seq_length])  # assigns the corresponding fault label to the end of the sequence  
 
-        return np.array(X)
+        return np.array(X), np.array(y)
     def get_processed_data(self, seq_length=48):
 
         self.load_data()
