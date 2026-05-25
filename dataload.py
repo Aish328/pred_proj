@@ -22,14 +22,14 @@ FAULT_COLORS = {
     5: "#c0392b",   # dark-red    Transformer Stress
 }
 
-V_SAG_LIMIT = 0.15
-V_SURGE_LIMIT = 0.90
+V_SAG_LIMIT = 0.25
+V_SURGE_LIMIT = 0.85
 
-IMBAL_THRESHOLD = 0.15
+IMBAL_THRESHOLD = 0.04
 
-OVERLOAD_LIMIT = 0.80
-XFMR_LOAD_LIM = 0.70
-XFMR_CURR_LIM = 0.70
+OVERLOAD_LIMIT = 0.15
+XFMR_LOAD_LIM = 0.20
+XFMR_CURR_LIM = 0.75
 
 class SmartGridDataLoader:
     def __init__(self, filepath):

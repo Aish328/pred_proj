@@ -1,273 +1,246 @@
 """
 eval_classifier.py
 -------------------
-Loads the trained LSTMClassifier and plots:
-  1. Reconstruction error (from autoencoder) with classified anomaly markers
-  2. Per-feature time-series plots (current, voltage, load) with
-     colour-coded fault labels overlaid
-  3. Fault-type distribution pie chart
+Runs the trained LSTMClassifier and plots:
+  1. Reconstruction error with classified anomaly markers
+  2. Three-phase currents (IR, IY, IB) with fault overlays
+  3. Line voltages (VRY, VYB, VBR) with fault overlays
+  4. Active Load with fault overlay
+  5. Fault-type distribution (bar + pie)
 
-Usage:
-    python eval_classifier.py
+Run:  python eval_classifier.py
 """
 
 import torch
 import numpy as np
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
-from matplotlib.gridspec import GridSpec
 from collections import Counter
 
-from dataload import SmartGridDataLoader
-from model import LSTMModel                       # your existing autoencoder
-from classifier import LSTMClassifier, FAULT_CLASSES, FAULT_COLORS
+from dataload import (SmartGridDataLoader, FAULT_CLASSES, FAULT_COLORS,
+                                V_SAG_LIMIT, V_SURGE_LIMIT, IMBAL_THRESHOLD,
+                                OVERLOAD_LIMIT)
+from model             import LSTMModel          # existing autoencoder
+from classifier  import LSTMClassifier
 
-# =====================================================
-# CONFIG
-# =====================================================
+# ── CONFIG ────────────────────────────────────────────────────────────
+FILEPATH         = r"C:\Users\sharika\Desktop\Pred\data\MAIIN_DATA (1).csv"
+AUTOENCODER_PATH = "lstm_model.pth"
+CLASSIFIER_PATH  = "lstm_classifier.pth"
+SEQ_LEN          = 48
+ANOMALY_PCT      = 95    # percentile threshold for autoencoder
 
-FILEPATH          = r"C:\Users\sharika\Desktop\Pred\data\MAIIN_DATA (1).csv"
-AUTOENCODER_PATH  = "lstm_model.pth"
-CLASSIFIER_PATH   = "lstm_classifier.pth"
-SEQ_LENGTH        = 48
-ANOMALY_PERCENTILE = 95          # same threshold as your eval.py
+FEAT_NAMES = ['IR', 'IY', 'IB', 'VRY', 'VYB', 'VBR', 'Active Load', 'hour', 'day']
 
-# =====================================================
-# LOAD & PREPROCESS DATA
-# =====================================================
-
-print("Loading data...")
+# ── LOAD DATA ─────────────────────────────────────────────────────────
+print("Loading data …")
 loader = SmartGridDataLoader(FILEPATH)
 loader.load_data()
 loader.preprocess()
-
 scaled = loader.scale_data()
 labels = loader.generate_fault_labels(scaled)
 
-X_np, _ = loader.create_sequences(scaled, labels, seq_length=SEQ_LENGTH)
-X        = torch.tensor(X_np, dtype=torch.float32)
-
-n_seq    = len(X)
+X_np, _ = loader.create_sequences(scaled, labels, seq_length=SEQ_LEN)
+X       = torch.tensor(X_np, dtype=torch.float32)
+n_seq   = len(X)
 print(f"Total sequences : {n_seq}")
 
-# =====================================================
-# FEATURE NAMES (must match dataload.py scale_data order)
-# =====================================================
-
-FEATURE_NAMES = ['IR', 'IY', 'IB', 'VRY', 'VYB', 'VBR', 'Active Load', 'hour', 'day']
-CURRENT_IDX   = [0, 1, 2]          # IR, IY, IB
-VOLTAGE_IDX   = [3, 4, 5]          # VRY, VYB, VBR
-LOAD_IDX      = [6]                 # Active Load
-
-# =====================================================
-# AUTOENCODER — RECONSTRUCTION ERRORS
-# =====================================================
-
-print("Running autoencoder...")
+# ── AUTOENCODER ───────────────────────────────────────────────────────
+print("Running autoencoder …")
 autoencoder = LSTMModel(input_size=X.shape[2])
 autoencoder.load_state_dict(torch.load(AUTOENCODER_PATH, weights_only=True))
 autoencoder.eval()
-
 with torch.no_grad():
-    reconstructed = autoencoder(X)
+    recon = autoencoder(X)
+recon_err = torch.mean((X - recon) ** 2, dim=(1, 2)).numpy()
+threshold  = np.percentile(recon_err, ANOMALY_PCT)
+is_anomaly = recon_err > threshold
+print(f"Threshold : {threshold:.6f}  |  Anomalies : {is_anomaly.sum()}")
 
-recon_errors = torch.mean((X - reconstructed) ** 2, dim=(1, 2)).numpy()
-threshold    = np.percentile(recon_errors, ANOMALY_PERCENTILE)
-is_anomaly   = recon_errors > threshold
+# ── CLASSIFIER ────────────────────────────────────────────────────────
+print("Running classifier …")
+clf = LSTMClassifier(input_size=X.shape[2])
+clf.load_state_dict(torch.load(CLASSIFIER_PATH, weights_only=True))
+clf.eval()
 
-print(f"Threshold       : {threshold:.6f}")
-print(f"Anomalies found : {is_anomaly.sum()}")
-
-# =====================================================
-# CLASSIFIER — FAULT LABELS
-# =====================================================
-
-print("Running fault classifier...")
-classifier = LSTMClassifier(input_size=X.shape[2])
-classifier.load_state_dict(torch.load(CLASSIFIER_PATH, weights_only=True))
-classifier.eval()
-
-CHUNK = 256          # process in chunks to avoid OOM on large datasets
-all_preds  = []
-all_probs  = []
-
-for start in range(0, n_seq, CHUNK):
-    xb         = X[start:start + CHUNK]
-    preds, probs = classifier.predict(xb)
+CHUNK = 256
+all_preds = []
+for s in range(0, n_seq, CHUNK):
+    preds, _ = clf.predict(X[s:s+CHUNK])
     all_preds.append(preds.numpy())
-    all_probs.append(probs.numpy())
+predicted = np.concatenate(all_preds)          # (n_seq,)
+# Only show fault label where autoencoder also flags anomaly
+# Show classifier labels directly — do not gate through autoencoder
+# The autoencoder gates were hiding faults it had learned to reconstruct well
+anomalyLabels_autoenc = np.where(is_anomaly, predicted, 0)   # kept for plot 1 only
+anomaly_labels = predicted                                     # all classifier predictions
 
-predicted_labels = np.concatenate(all_preds)   # (n_seq,)
-predicted_probs  = np.concatenate(all_probs)   # (n_seq, 6)
+# ── HELPERS ───────────────────────────────────────────────────────────
+seq_idx  = np.arange(n_seq)
+mid_vals = X_np[:, SEQ_LEN // 2, :]    # representative value per sequence
 
-# Anomaly-only labels (non-anomalies shown as Normal)
-anomaly_labels = np.where(is_anomaly, predicted_labels, 0)
+legend_handles = [
+    mpatches.Patch(color=FAULT_COLORS[c], label=f"{c}: {FAULT_CLASSES[c]}")
+    for c in range(1, 6)
+]
 
-print("\nFault distribution (anomalous sequences only):")
-for cls, cnt in sorted(Counter(predicted_labels[is_anomaly]).items()):
-    print(f"  {FAULT_CLASSES[cls]:20s}: {cnt}")
-
-# =====================================================
-# HELPER — scatter anomalies coloured by fault type
-# =====================================================
-
-def scatter_faults(ax, x_vals, y_vals, labels_arr, size=18, zorder=5):
+def scatter_faults(ax, xvals, yvals, alabs, size=20):
     for cls in range(1, 6):
-        mask = labels_arr == cls
-        if mask.any():
-            ax.scatter(
-                x_vals[mask], y_vals[mask],
-                color=FAULT_COLORS[cls],
-                label=FAULT_CLASSES[cls],
-                s=size, zorder=zorder, linewidths=0
-            )
+        m = alabs == cls
+        if m.any():
+            ax.scatter(xvals[m], yvals[m],
+                       color=FAULT_COLORS[cls], s=size,
+                       zorder=5, linewidths=0)
 
-# =====================================================
-# SHARED X-AXIS (sequence indices)
-# =====================================================
-
-seq_idx = np.arange(n_seq)
-
-# Mid-point value of each sequence for each feature
-# shape: (n_seq, 9)
-mid_vals = X_np[:, SEQ_LENGTH // 2, :]
-
-# =====================================================
-# PLOT 1 — RECONSTRUCTION ERROR WITH FAULT LABELS
-# =====================================================
-
-fig1, ax = plt.subplots(figsize=(16, 4))
-
-ax.plot(seq_idx, recon_errors, color='steelblue', linewidth=1, label='Reconstruction Error')
-ax.axhline(threshold, color='black', linestyle='--', linewidth=1, label=f'Threshold ({threshold:.4f})')
-
-scatter_faults(ax, seq_idx, recon_errors, anomaly_labels)
-
-ax.set_title("LSTM Autoencoder — Reconstruction Error with Fault Classification", fontsize=13)
-ax.set_xlabel("Sequence Index")
-ax.set_ylabel("MSE")
-ax.legend(loc='upper left', fontsize=8, ncol=3)
-ax.grid(alpha=0.3)
-
-plt.tight_layout()
-plt.savefig("eval_recon_error_classified.png", dpi=150)
-plt.show()
-
-# =====================================================
-# PLOT 2 — CURRENT (IR, IY, IB)
-# =====================================================
-
-fig2, axes = plt.subplots(3, 1, figsize=(16, 9), sharex=True)
-fig2.suptitle("Phase Currents with Fault Classification", fontsize=13, fontweight='bold')
-
-for i, (feat_i, name) in enumerate(zip(CURRENT_IDX, ['IR', 'IY', 'IB'])):
-    ax   = axes[i]
-    vals = mid_vals[:, feat_i]
-    ax.plot(seq_idx, vals, color='royalblue', linewidth=0.8, alpha=0.9)
-    scatter_faults(ax, seq_idx, vals, anomaly_labels)
-    ax.set_ylabel(f"{name} (scaled)", fontsize=9)
-    ax.grid(alpha=0.25)
-
-# Single legend for all subplots
-handles = [mpatches.Patch(color=FAULT_COLORS[c], label=FAULT_CLASSES[c])
-           for c in range(1, 6)]
-axes[0].legend(handles=handles, loc='upper right', fontsize=8, ncol=2)
-axes[-1].set_xlabel("Sequence Index")
-
-plt.tight_layout()
-plt.savefig("eval_currents_classified.png", dpi=150)
-plt.show()
-
-# =====================================================
-# PLOT 3 — VOLTAGE (VRY, VYB, VBR)
-# =====================================================
-
-fig3, axes = plt.subplots(3, 1, figsize=(16, 9), sharex=True)
-fig3.suptitle("Line Voltages with Fault Classification", fontsize=13, fontweight='bold')
-
-for i, (feat_i, name) in enumerate(zip(VOLTAGE_IDX, ['VRY', 'VYB', 'VBR'])):
-    ax   = axes[i]
-    vals = mid_vals[:, feat_i]
-    ax.plot(seq_idx, vals, color='darkorange', linewidth=0.8, alpha=0.9)
-    scatter_faults(ax, seq_idx, vals, anomaly_labels)
-    ax.set_ylabel(f"{name} (scaled)", fontsize=9)
-    ax.grid(alpha=0.25)
-
-handles = [mpatches.Patch(color=FAULT_COLORS[c], label=FAULT_CLASSES[c])
-           for c in range(1, 6)]
-axes[0].legend(handles=handles, loc='upper right', fontsize=8, ncol=2)
-axes[-1].set_xlabel("Sequence Index")
-
-plt.tight_layout()
-plt.savefig("eval_voltages_classified.png", dpi=150)
-plt.show()
-
-# =====================================================
-# PLOT 4 — ACTIVE LOAD
-# =====================================================
-
-fig4, ax = plt.subplots(figsize=(16, 3.5))
-vals = mid_vals[:, LOAD_IDX[0]]
-ax.plot(seq_idx, vals, color='purple', linewidth=0.8, alpha=0.9)
-scatter_faults(ax, seq_idx, vals, anomaly_labels)
-
-handles = [mpatches.Patch(color=FAULT_COLORS[c], label=FAULT_CLASSES[c])
-           for c in range(1, 6)]
-ax.legend(handles=handles, loc='upper right', fontsize=8, ncol=2)
-ax.set_title("Active Load with Fault Classification", fontsize=13)
-ax.set_xlabel("Sequence Index")
-ax.set_ylabel("Active Load (scaled)")
+# ─────────────────────────────────────────────────────────────────────
+# PLOT 1 — RECONSTRUCTION ERROR
+# ─────────────────────────────────────────────────────────────────────
+fig, ax = plt.subplots(figsize=(16, 4))
+ax.plot(seq_idx, recon_err, color='steelblue', lw=1, label='Reconstruction Error')
+ax.axhline(threshold, color='k', ls='--', lw=1, label=f'Threshold ({threshold:.4f})')
+scatter_faults(ax, seq_idx, recon_err, anomalyLabels_autoenc)
+ax.legend(handles=[ax.lines[0], ax.lines[1]] + legend_handles,
+          loc='upper left', fontsize=8, ncol=4)
+ax.set_title("Reconstruction Error — Autoencoder with Classified Anomalies", fontsize=13)
+ax.set_xlabel("Sequence Index"); ax.set_ylabel("MSE")
 ax.grid(alpha=0.25)
-
 plt.tight_layout()
-plt.savefig("eval_load_classified.png", dpi=150)
-plt.show()
+plt.savefig("plot1_recon_error.png", dpi=150)
+plt.close()
 
-# =====================================================
-# PLOT 5 — FAULT DISTRIBUTION (PIE)
-# =====================================================
-
-anomaly_class_counts = Counter(predicted_labels[is_anomaly])
-labels_pie  = [FAULT_CLASSES[c] for c in sorted(anomaly_class_counts)]
-sizes_pie   = [anomaly_class_counts[c] for c in sorted(anomaly_class_counts)]
-colors_pie  = [FAULT_COLORS[c] for c in sorted(anomaly_class_counts)]
-
-fig5, ax = plt.subplots(figsize=(7, 7))
-wedges, texts, autotexts = ax.pie(
-    sizes_pie,
-    labels=labels_pie,
-    colors=colors_pie,
-    autopct='%1.1f%%',
-    startangle=140,
-    pctdistance=0.82
+# ─────────────────────────────────────────────────────────────────────
+# PLOT 2 — THREE-PHASE CURRENTS
+# ─────────────────────────────────────────────────────────────────────
+fig, axes = plt.subplots(3, 1, figsize=(16, 10), sharex=True)
+fig.suptitle(
+    f"Three-Phase Currents with Fault Classification\n"
+    f"(Current Imbalance threshold: max |Ix – mean| > {IMBAL_THRESHOLD})",
+    fontsize=13, fontweight='bold'
 )
-for at in autotexts:
-    at.set_fontsize(9)
 
-ax.set_title("Fault Type Distribution\n(Anomalous Sequences Only)", fontsize=13)
+for ax, feat_i, name, color in zip(
+        axes,
+        [0, 1, 2],
+        ['IR (Phase R)', 'IY (Phase Y)', 'IB (Phase B)'],
+        ['royalblue', 'darkorange', 'forestgreen']
+):
+    vals = mid_vals[:, feat_i]
+    ax.plot(seq_idx, vals, color=color, lw=0.9, alpha=0.85)
+    scatter_faults(ax, seq_idx, vals, anomaly_labels)
+    ax.set_ylabel(f"{name}\n(scaled 0–1)", fontsize=9)
+    ax.grid(alpha=0.25)
+
+axes[0].legend(handles=legend_handles, loc='upper right', fontsize=8, ncol=2)
+axes[-1].set_xlabel("Sequence Index")
 plt.tight_layout()
-plt.savefig("eval_fault_distribution.png", dpi=150)
-plt.show()
+plt.savefig("plot2_currents.png", dpi=150)
+plt.close()
 
-# =====================================================
-# SUMMARY
-# =====================================================
+# ─────────────────────────────────────────────────────────────────────
+# PLOT 3 — LINE VOLTAGES
+# ─────────────────────────────────────────────────────────────────────
+fig, axes = plt.subplots(3, 1, figsize=(16, 10), sharex=True)
+fig.suptitle(
+    f"Line Voltages with Fault Classification\n"
+    f"(Sag < {V_SAG_LIMIT}  |  Surge > {V_SURGE_LIMIT}  — scaled values)",
+    fontsize=13, fontweight='bold'
+)
 
+for ax, feat_i, name, color in zip(
+        axes,
+        [3, 4, 5],
+        ['VRY (R–Y)', 'VYB (Y–B)', 'VBR (B–R)'],
+        ['crimson', 'darkorange', 'mediumpurple']
+):
+    vals = mid_vals[:, feat_i]
+    ax.plot(seq_idx, vals, color=color, lw=0.9, alpha=0.85)
+
+    # Draw threshold bands
+    ax.axhline(V_SAG_LIMIT,   color='red',    ls=':', lw=1.2, alpha=0.7,
+               label=f'Sag limit  ({V_SAG_LIMIT})')
+    ax.axhline(V_SURGE_LIMIT, color='orange', ls=':', lw=1.2, alpha=0.7,
+               label=f'Surge limit ({V_SURGE_LIMIT})')
+
+    scatter_faults(ax, seq_idx, vals, anomaly_labels)
+    ax.set_ylabel(f"{name}\n(scaled 0–1)", fontsize=9)
+    ax.grid(alpha=0.25)
+    ax.legend(loc='upper right', fontsize=7, ncol=2)
+
+axes[0].legend(
+    handles=legend_handles + [
+        mpatches.Patch(color='red',    alpha=0.7, label=f'Sag limit  ({V_SAG_LIMIT})'),
+        mpatches.Patch(color='orange', alpha=0.7, label=f'Surge limit ({V_SURGE_LIMIT})')
+    ],
+    loc='upper right', fontsize=7, ncol=2
+)
+axes[-1].set_xlabel("Sequence Index")
+plt.tight_layout()
+plt.savefig("plot3_voltages.png", dpi=150)
+plt.close()
+
+# ─────────────────────────────────────────────────────────────────────
+# PLOT 4 — ACTIVE LOAD
+# ─────────────────────────────────────────────────────────────────────
+fig, ax = plt.subplots(figsize=(16, 4))
+vals = mid_vals[:, 6]
+ax.plot(seq_idx, vals, color='purple', lw=0.9, alpha=0.9, label='Active Load')
+ax.axhline(OVERLOAD_LIMIT, color='red', ls='--', lw=1.2,
+           label=f'Overload limit ({OVERLOAD_LIMIT})')
+scatter_faults(ax, seq_idx, vals, anomaly_labels)
+ax.legend(handles=[ax.lines[0], ax.lines[1]] + legend_handles,
+          loc='upper right', fontsize=8, ncol=3)
+ax.set_title("Active Load with Fault Classification", fontsize=13)
+ax.set_xlabel("Sequence Index"); ax.set_ylabel("Active Load (scaled 0–1)")
+ax.grid(alpha=0.25)
+plt.tight_layout()
+plt.savefig("plot4_load.png", dpi=150)
+plt.close()
+
+# ─────────────────────────────────────────────────────────────────────
+# PLOT 5 — FAULT DISTRIBUTION
+# ─────────────────────────────────────────────────────────────────────
+# Plot 5: use all classifier predictions (not just autoencoder-gated)
+anom_classes = Counter(predicted[predicted > 0])
+classes_present = sorted(anom_classes)
+labels_pie  = [FAULT_CLASSES[c] for c in classes_present]
+sizes_pie   = [anom_classes[c]  for c in classes_present]
+colors_pie  = [FAULT_COLORS[c]  for c in classes_present]
+
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 6))
+fig.suptitle("Fault Type Distribution (All Classifier Predictions)", fontsize=13, fontweight='bold')
+
+# Pie
+ax1.pie(sizes_pie, labels=labels_pie, colors=colors_pie,
+        autopct='%1.1f%%', startangle=140, pctdistance=0.82)
+ax1.set_title("Share by Fault Type")
+
+# Bar
+bars = ax2.bar(labels_pie, sizes_pie, color=colors_pie, edgecolor='k', linewidth=0.5)
+ax2.bar_label(bars, padding=3, fontsize=9)
+ax2.set_ylabel("Number of sequences")
+ax2.set_title("Count by Fault Type")
+ax2.tick_params(axis='x', rotation=25)
+ax2.grid(axis='y', alpha=0.3)
+
+plt.tight_layout()
+plt.savefig("plot5_fault_distribution.png", dpi=150)
+plt.close()
+
+# ── SUMMARY ───────────────────────────────────────────────────────────
 print("\n=== EVALUATION SUMMARY ===")
-print(f"Total sequences analysed : {n_seq}")
-print(f"Anomalies detected       : {is_anomaly.sum()}  ({is_anomaly.mean()*100:.1f}%)")
-print(f"Reconstruction threshold : {threshold:.6f}")
+print(f"Total sequences  : {n_seq}")
+print(f"Autoenc anomalies: {is_anomaly.sum()}  ({is_anomaly.mean()*100:.1f}%)")
+print(f"Recon threshold  : {threshold:.6f}")
 print("\nFault breakdown (anomalous sequences):")
-for cls in sorted(anomaly_class_counts):
-    pct = anomaly_class_counts[cls] / is_anomaly.sum() * 100
-    print(f"  {FAULT_CLASSES[cls]:22s}: {anomaly_class_counts[cls]:4d}  ({pct:.1f}%)")
+for cls in sorted(anom_classes):
+    if cls == 0: continue
+    pct = anom_classes[cls] / is_anomaly.sum() * 100
+    print(f"  {FAULT_CLASSES[cls]:22s}: {anom_classes[cls]:4d}  ({pct:.1f}%)")
 
+saved = ["plot1_recon_error.png","plot2_currents.png",
+         "plot3_voltages.png","plot4_load.png","plot5_fault_distribution.png"]
 print("\nSaved plots:")
-for fname in [
-    "eval_recon_error_classified.png",
-    "eval_currents_classified.png",
-    "eval_voltages_classified.png",
-    "eval_load_classified.png",
-    "eval_fault_distribution.png"
-]:
-    print(f"  {fname}")
+for f in saved:
+    print(f"  {f}")
