@@ -4,9 +4,36 @@ import pandas as pd
 import numpy as np
 from sklearn.preprocessing import MinMaxScaler
 import torch
+FAULT_CLASSES = {
+    0: "Normal",
+    1: "Voltage Sag",       # any line-voltage below lower limit
+    2: "Voltage Surge",     # any line-voltage above upper limit
+    3: "Current Imbalance", # 3-phase unbalance → load imbalance
+    4: "Overload",          # active load too high
+    5: "Transformer Stress" # high load + high current simultaneously
+}
+ 
+FAULT_COLORS = {
+    0: "#2ecc71",   # green       Normal
+    1: "#e74c3c",   # red         Voltage Sag
+    2: "#f39c12",   # amber       Voltage Surge
+    3: "#3498db",   # blue        Current Imbalance
+    4: "#9b59b6",   # purple      Overload
+    5: "#c0392b",   # dark-red    Transformer Stress
+}
+
+V_SAG_LIMIT = 0.15
+V_SURGE_LIMIT = 0.90
+
+IMBAL_THRESHOLD = 0.15
+
+OVERLOAD_LIMIT = 0.80
+XFMR_LOAD_LIM = 0.70
+XFMR_CURR_LIM = 0.70
 
 class SmartGridDataLoader:
     def __init__(self, filepath):
+        self.filepath = filepath
         self.filepath = filepath
         self.df = None
         # self.data_hourly = None
@@ -109,34 +136,29 @@ class SmartGridDataLoader:
             VYB = row[4]    
             VBR = row[5]
             LOAD = row[6]
-            if VRY < 0.20:
-                labels[i] = 1
 
-            # ==================================
-            # 2 = CURRENT IMBALANCE
-            # ==================================
-            elif abs(IR - IY) > 0.40:
-                labels[i] = 2
+            if VRY < V_SAG_LIMIT or VYB < V_SAG_LIMIT or VBR < V_SAG_LIMIT:
+                labels[i] = 1 #VOLTAGE SAG
 
-            # ==================================
-            # 3 = OVERLOAD
-            # ==================================
-            elif LOAD > 0.80:
-                labels[i] = 3
+            elif VRY > V_SURGE_LIMIT or VYB > V_SURGE_LIMIT or VBR > V_SURGE_LIMIT:
+                labels[i] = 2 #VOLTAGE SURGE
+            elif max(
+                abs(IR - (IR+IY+IB)/3),
+                abs(IY - (IR+IY+IB)/3), 
+                abs(IB - (IR+IY+IB)/3)
+            )> IMBAL_THRESHOLD:
+                
+                labels[i] = 3 #CURRENT IMBALANCE
+            elif (LOAD > OVERLOAD_LIMIT):
+                labels[i] = 4 #OVERLOAD
 
-            # ==================================
-            # 4 = VOLTAGE SWELL
-            # ==================================
-            elif VRY > 0.95:
-                labels[i] = 4
-
-            # ==================================
-            # 5 = TRANSFORMER STRESS
-            # ==================================
-            elif LOAD > 0.70 and IR > 0.70:
+            elif (LOAD > XFMR_LOAD_LIM and (IR >XFMR_CURR_LIM or IY > XFMR_CURR_LIM or IB > XFMR_CURR_LIM)):
                 labels[i] = 5
+        return labels
+            
 
-        return labels.astype(int)
+           
+
 
 
     def create_sequences(self, data, labels, seq_length=48):        #for time series forecasting : creates input output pairs for sliding window

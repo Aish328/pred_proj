@@ -6,7 +6,7 @@ from dataload import SmartGridDataLoader
 from model import LSTMModel
 
 # 🔹 Load data
-filepath = r"C:\Users\sharika\Desktop\Pred_proj\pred_proj\data\MAIIN_DATA (1).csv"
+filepath = r"C:\Users\sharika\Desktop\pred\data\MAIIN_DATA (1).csv"
 
 processor = SmartGridDataLoader(filepath)
 X = processor.get_processed_data(seq_length=48)
