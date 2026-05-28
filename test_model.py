@@ -2,7 +2,7 @@ import torch
 import numpy as np
 from model import LSTMModel
 from dataload import SmartGridDataLoader
-from classifier_model import LSTMClassifier
+from classifier import LSTMClassifier
 import matplotlib.pyplot as plt
 FAULTS  = {
     0: "No Fault",
