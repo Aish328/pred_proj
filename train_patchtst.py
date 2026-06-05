@@ -164,18 +164,19 @@ if len(patch_df) == 0:
 logging.getLogger("pytorch_lightning").setLevel(logging.INFO)
 
 model = PatchTST(
-    h=480,              # 24 hours ahead (480 × 3min = 1440min = 24hr)
-    input_size=960,     # 48 hours context (960 × 3min = 48hr)
-    patch_len=16,       # 48 min per patch — good for 3min data
-    stride=8,
-    hidden_size=256,    # increased capacity
-    n_heads=8,
-    batch_size=32,
+    h=48,              # 24 hours ahead (480 × 3min = 1440min = 24hr)
+    input_size=96,     # 48 hours context (960 × 3min = 48hr)
+    patch_len=8,       # 48 min per patch — good for 3min data
+    stride=4,
+    hidden_size=128,    # increased capacity
+    n_heads=4,
+    batch_size=8,
     learning_rate=0.0001,
-    max_steps=1000,
-    val_check_steps=50,
+    max_steps=500,
+    val_check_steps=25,
     scaler_type="identity",   # no scaling — matches unscaled dashboard
     dropout=0.1,
+    start_padding_enabled=True,
 )
 
 nf = NeuralForecast(
@@ -185,8 +186,8 @@ nf = NeuralForecast(
 
 print("\n==============================")
 print("PATCHTST TRAINING STARTED")
-print(f"  Horizon:    480 steps = 24 hours")
-print(f"  Context:    960 steps = 48 hours")
+print(f"  Horizon:    48 steps = 24 hours")
+print(f"  Context:    96 steps = 48 hours")
 print(f"  Frequency:  3 minutes")
 print(f"  Steps:      1000")
 print("==============================\n")
